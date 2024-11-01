@@ -3,7 +3,10 @@ package ru.petrsushilin.global.authservice.service;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.util.Pair;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 import ru.petrsushilin.global.authservice.enitity.enums.TokenType;
 
 import java.security.KeyFactory;
@@ -17,6 +20,7 @@ import java.util.Date;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Stream;
 
 @Service
 public class JwtService {
@@ -50,15 +54,22 @@ public class JwtService {
                 .generatePublic(new X509EncodedKeySpec(Base64.getDecoder().decode(publicKeyEncoded)));
     }
 
-    public Optional<String> generate(String login) {
-        Map<TokenType, String> generatedTokens = generateTokenPair(login);
-
-        if (redisService.registerAccessToken(login, generatedTokens.get(TokenType.ACCESS)) &
-                redisService.registerRefreshToken(login, generatedTokens.get(TokenType.REFRESH))) {
-            return Optional.of(generatedTokens.get(TokenType.ACCESS));
-        }
-
-        return Optional.empty();
+    public Mono<String> generate(String login) {
+        return generateTokenPair(login)
+                .flatMap(generatedToken ->
+                        redisService.registerAccessToken(login, generatedToken.get(TokenType.ACCESS))
+                                .flatMap(successRegisterAccessToken -> {
+                                    if (Boolean.TRUE.equals(successRegisterAccessToken)) {
+                                        redisService.registerRefreshToken(login, generatedToken.get(TokenType.REFRESH))
+                                                .flatMap(successRegisterRefreshToken ->
+                                                    Boolean.TRUE.equals(successRegisterRefreshToken)
+                                                            ? Mono.just(generatedToken.get(TokenType.ACCESS))
+                                                            : Mono.empty()
+                                                );
+                                    }
+                                    return Mono.empty();
+                                })
+                );
     }
 
     /**
@@ -70,51 +81,55 @@ public class JwtService {
      * @param token is JWT token of response
      * @return Optional of map consists of current JWT and roles
      */
-    public Optional<Map<String, Set<String>>> validate(String token) {
+    public Mono<Map<String, Set<TokenType>>> validate(String token) {
         Claims claimsJws = this.parseToken(token);
         String login = claimsJws.getSubject();
 
         if (isNotExpire(claimsJws)) {
-            return Optional.of(Map.of(token, redisService.getRoles(login)));
+            return Mono.just(Map.of(token, redisService.getRoles(login)));
         }
 
         if (redisService.isRefreshTokenHasNotExpire(login)) {
             String freshToken = generateToken(login, jwtAccessExpiration);
 
             if (redisService.registerAccessToken(login, freshToken)) {
-                return Optional.of(Map.of(freshToken,redisService.getRoles(login)));
+                return Mono.just(Map.of(freshToken,redisService.getRoles(login)));
             }
         }
 
-        return Optional.empty();
+        return Mono.empty();
     }
 
-    private Map<TokenType, String> generateTokenPair(String login) {
-        return Map.of(
-                TokenType.ACCESS, generateToken(login, jwtAccessExpiration),
-                TokenType.REFRESH, generateToken(login, jwtRefreshExpiration)
+    private Mono<Map<TokenType, String>> generateTokenPair(String login) {
+        return Mono.zip(
+                generateToken(login, jwtAccessExpiration),
+                generateToken(login, jwtRefreshExpiration),
+                (accessToken, refreshToken) -> Map.of(
+                        TokenType.ACCESS, accessToken,
+                        TokenType.REFRESH, refreshToken
+                )
         );
     }
 
-    private String generateToken(String login, long expirationTime) {
+    private Mono<String> generateToken(String login, long expirationTime) {
         Date issuedAt = new Date();
-        return Jwts.builder()
+        return Mono.just(Jwts.builder()
                 .subject(login)
                 .issuedAt(issuedAt)
                 .expiration(Date.from(issuedAt.toInstant().plusMillis(expirationTime)))
                 .signWith(privateKey)
-                .compact();
+                .compact());
     }
 
-    private Claims parseToken(String token) {
-        return Jwts.parser()
+    private Mono<Claims> parseToken(String token) {
+        return Mono.just(Jwts.parser()
                 .verifyWith(publicKey)
                 .build()
                 .parseSignedClaims(token)
-                .getPayload();
+                .getPayload());
     }
 
-    private boolean isNotExpire(Claims claimsJws) {
-        return Instant.now().isBefore(claimsJws.getExpiration().toInstant());
+    private Mono<Boolean> isNotExpire(Claims claimsJws) {
+        return Mono.just(Instant.now().isBefore(claimsJws.getExpiration().toInstant()));
     }
 }

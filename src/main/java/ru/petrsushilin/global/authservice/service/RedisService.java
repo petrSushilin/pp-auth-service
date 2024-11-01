@@ -6,14 +6,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.ReactiveRedisTemplate;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import ru.petrsushilin.global.authservice.enitity.enums.Role;
 import ru.petrsushilin.global.authservice.enitity.enums.TokenType;
 import ru.petrsushilin.global.authservice.repository.AccountRepository;
 
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
 
 @Service
 public class RedisService {
@@ -32,11 +34,12 @@ public class RedisService {
         this.repository = repository;
     }
 
-    public Mono<Set<String>> refreshRoles(String login) {
+    public Flux<String> refreshRoles(String login) {
         return repository.getRolesByLogin(login)
-                .flatMap(roles -> {
-                    redisTemplate.opsForHash().put(TokenType.ACCESS.name() + ":" + login,"roles", roles);
-                    return Mono.just(roles);
+                .flatMapMany(roles -> {
+                    return redisTemplate.opsForHash()
+                            .put(TokenType.ACCESS.name() + ":" + login,"roles", roles)
+                            .thenMany(Flux.fromIterable(roles));
                 });
     }
 
@@ -44,42 +47,49 @@ public class RedisService {
         String accessKey = TokenType.ACCESS.name() + ":" + login;
 
         return repository.getRolesByLogin(login)
-                .<Boolean>handle((roles, sink) -> {
+                .flatMap(roles -> {
                     Map<String, String> accessData = new HashMap<>();
                     accessData.put("token", jwtAccessToken);
+
                     try {
                         accessData.put("roles", objectMapper.writeValueAsString(roles));
                     } catch (JsonProcessingException e) {
-                        sink.error(new RuntimeException(e));
+                        return Mono.error(new RuntimeException("Failed to serialize roles", e));
                     }
-                    redisTemplate.opsForHash().putAll(accessKey, accessData);
-                    sink.next(Boolean.TRUE.equals(redisTemplate.expire(accessKey, jwtAccessExpiration, TimeUnit.MILLISECONDS)));
-                }).onErrorReturn(false);
+
+                    return redisTemplate.opsForHash().putAll(accessKey, accessData)
+                            .flatMap(success -> {
+                                if (Boolean.TRUE.equals(success)) {
+                                    return redisTemplate.expire(accessKey, Duration.ofMillis(jwtAccessExpiration));
+                                }
+                                return Mono.just(false);
+                            });
+                })
+                .onErrorReturn(false);
     }
 
-    boolean registerRefreshToken(String login, String jwtRefreshToken) {
-        try {
-            redisTemplate.opsForValue().set(TokenType.REFRESH.name() + ":" + login, jwtRefreshToken, jwtRefreshExpiration, TimeUnit.MILLISECONDS);
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
+    Mono<Boolean> registerRefreshToken(String login, String jwtRefreshToken) {
+        return redisTemplate.opsForValue()
+                .set(TokenType.REFRESH.name() + ":" + login, jwtRefreshToken, Duration.ofMillis(jwtRefreshExpiration))
+                .map(result -> result != null && result);
     }
 
-    Set<String> getRoles(String login) {
-        String rolesJson = (String) redisTemplate.opsForHash().get(TokenType.ACCESS.name() + ":" + login, "roles");
-        try {
-            return objectMapper.readValue(rolesJson, new TypeReference<Set<String>>() {});
-        } catch (JsonProcessingException e) {
-            return Set.of();
-        }
+    Flux<Role> getRoles(String login) {
+        return redisTemplate.opsForHash().get(TokenType.ACCESS.name() + ":" + login, "roles")
+                .flatMapMany(role -> {
+                    try {
+                        return Flux.fromIterable(objectMapper.readValue((String) role, new TypeReference<Set<Role>>() {}));
+                    } catch (JsonProcessingException e) {
+                        return Flux.error(new RuntimeException("Failed to deserialize roles", e));
+                    }
+                });
     }
 
-    boolean isRefreshTokenHasNotExpire(String login) {
-        Long expirationTimeInMillis = redisTemplate.getExpire(TokenType.REFRESH.name() + ":" + login, TimeUnit.MILLISECONDS);
-        if (expirationTimeInMillis == null || expirationTimeInMillis <= 0) {
-            return false;
-        }
-        return System.currentTimeMillis() < expirationTimeInMillis;
+    Mono<Boolean> isRefreshTokenHasNotExpire(String login) {
+        return redisTemplate.getExpire(TokenType.REFRESH.name() + ":" + login)
+                .flatMap(duration -> {
+                    return duration != null && !duration.isNegative() ? Mono.just(true) : Mono.just(false);
+                })
+                .defaultIfEmpty(false);
     }
 }
