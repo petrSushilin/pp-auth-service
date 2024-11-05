@@ -1,7 +1,8 @@
-package ru.petrsushilin.global.authservice.configuration;
+package ru.petrsushilin.global.authservice.infrastructure.configuration;
 
 import io.lettuce.core.resource.ClientResources;
 import io.lettuce.core.resource.DefaultClientResources;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
@@ -16,6 +17,9 @@ import org.springframework.data.redis.serializer.StringRedisSerializer;
 @Configuration
 public class RedisConfiguration {
 
+    @Value("${redis.password}")
+    private String password;
+
     @Bean(destroyMethod = "shutdown")
     public ClientResources clientResources() {
         return DefaultClientResources.create();
@@ -24,7 +28,7 @@ public class RedisConfiguration {
     @Bean
     public LettuceConnectionFactory redisConnectionFactory(ClientResources clientResources) {
         RedisStandaloneConfiguration redisConfig = new RedisStandaloneConfiguration("localhost", 6379);
-        redisConfig.setPassword("mypassword");
+        redisConfig.setPassword(password);
 
         LettuceClientConfiguration clientConfig = LettucePoolingClientConfiguration.builder()
                 .poolConfig(getPoolConfig())
@@ -36,9 +40,9 @@ public class RedisConfiguration {
 
     private GenericObjectPoolConfig<?> getPoolConfig() {
         GenericObjectPoolConfig<?> poolConfig = new GenericObjectPoolConfig<>();
-        poolConfig.setMaxTotal(10);     // Максимум соединений в пуле
-        poolConfig.setMaxIdle(5);       // Максимум простаивающих соединений
-        poolConfig.setMinIdle(1);       // Минимум простаивающих соединений
+        poolConfig.setMaxTotal(10);
+        poolConfig.setMaxIdle(5);
+        poolConfig.setMinIdle(1);
         return poolConfig;
     }
 

@@ -1,6 +1,4 @@
-package ru.petrsushilin.global.authservice.enitity;
-
-import org.springframework.boot.autoconfigure.domain.EntityScan;
+package ru.petrsushilin.global.authservice.domain.enitity;
 
 import java.util.Set;
 import java.util.UUID;

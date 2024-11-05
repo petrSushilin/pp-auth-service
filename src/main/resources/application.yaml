@@ -1,13 +1,22 @@
 spring:
+  r2dbc:
+    url: r2dbc:postgresql://localhost:5432/${R2DBC_DB}
+    username: ${R2DBC_USERNAME}
+    password: ${R2DBC_PASSWORD}
+  sql:
+    init:
+      mode: always
   kafka:
     consumer:
       bootstrap-servers: localhost:9092
       group-id: auth-service
       auto-offset-reset: earliest
-  redis:
 
 jwt:
   access:
     expiration: 900_000
   refresh:
     expiration: 604_800_000
+
+redis:
+  password: ${REDIS_PASSWORD}

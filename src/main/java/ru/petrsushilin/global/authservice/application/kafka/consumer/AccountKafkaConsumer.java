@@ -1,8 +1,7 @@
-package ru.petrsushilin.global.authservice.consumer;
+package ru.petrsushilin.global.authservice.application.kafka.consumer;
 
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Service;
-import ru.petrsushilin.global.authservice.enitity.Account;
 
     @Service
     public class AccountKafkaConsumer {

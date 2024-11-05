@@ -1,13 +1,12 @@
-package ru.petrsushilin.global.authservice.service;
+package ru.petrsushilin.global.authservice.application.service;
 
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.data.util.Pair;
 import org.springframework.stereotype.Service;
-import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-import ru.petrsushilin.global.authservice.enitity.enums.TokenType;
+import ru.petrsushilin.global.authservice.domain.enitity.enums.Role;
+import ru.petrsushilin.global.authservice.domain.enitity.enums.TokenType;
 
 import java.security.KeyFactory;
 import java.security.PrivateKey;
@@ -18,9 +17,7 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.Date;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
-import java.util.stream.Stream;
 
 @Service
 public class JwtService {
@@ -58,46 +55,53 @@ public class JwtService {
         return generateTokenPair(login)
                 .flatMap(generatedToken ->
                         redisService.registerAccessToken(login, generatedToken.get(TokenType.ACCESS))
-                                .flatMap(successRegisterAccessToken -> {
-                                    if (Boolean.TRUE.equals(successRegisterAccessToken)) {
-                                        redisService.registerRefreshToken(login, generatedToken.get(TokenType.REFRESH))
-                                                .flatMap(successRegisterRefreshToken ->
-                                                    Boolean.TRUE.equals(successRegisterRefreshToken)
-                                                            ? Mono.just(generatedToken.get(TokenType.ACCESS))
-                                                            : Mono.empty()
-                                                );
-                                    }
-                                    return Mono.empty();
-                                })
+                                .switchIfEmpty(Mono.error(new RuntimeException("Failed to register access token")))
+                                .filter(Boolean::booleanValue)
+                                .then(redisService.registerRefreshToken(login, generatedToken.get(TokenType.REFRESH)))
+                                .switchIfEmpty(Mono.error(new RuntimeException("Failed to register refresh token")))
+                                .filter(Boolean::booleanValue)
+                                .thenReturn(generatedToken.get(TokenType.ACCESS))
                 );
     }
 
     /**
      * Method returns map of token and roles.
-     * If access token has expired returns refresh token and roles.
-     * If refresh token has expired or validation failed returns empty Optional.
+     * If access token has expired, but refresh did not, returns refreshed access token and roles.
+     * If refresh token has expired or validation failed returns empty Mono.
      * Set of roles can be empty. You should use method Set.contains(Object o).
      *
      * @param token is JWT token of response
-     * @return Optional of map consists of current JWT and roles
+     * @return Mono of map consists of current JWT and roles or empty then unsuccessful
      */
-    public Mono<Map<String, Set<TokenType>>> validate(String token) {
-        Claims claimsJws = this.parseToken(token);
-        String login = claimsJws.getSubject();
+    public Mono<Map<String, Set<Role>>> validate(String token) {
+        return parseToken(token)
+                .switchIfEmpty(Mono.error(new RuntimeException("Token parsing unsuccessful")))
+                .flatMap(claims -> isNotExpire(claims)
+                        .switchIfEmpty(Mono.error(new RuntimeException("Token has been expired")))
+                        .filter(Boolean::booleanValue)
+                        .thenReturn(claims.getSubject())
+                )
+                .flatMap(this::getTokenByRefresh)
+                .switchIfEmpty(Mono.empty());
+}
 
-        if (isNotExpire(claimsJws)) {
-            return Mono.just(Map.of(token, redisService.getRoles(login)));
-        }
+    private Mono<Map<String, Set<Role>>> getTokenByRefresh(String login) {
+        return redisService.isRefreshTokenHasNotExpire(login)
+                .flatMap(isRefreshValid -> isRefreshValid
+                        ? generateAccessToken(login)
+                        : Mono.empty()
+                );
+    }
 
-        if (redisService.isRefreshTokenHasNotExpire(login)) {
-            String freshToken = generateToken(login, jwtAccessExpiration);
-
-            if (redisService.registerAccessToken(login, freshToken)) {
-                return Mono.just(Map.of(freshToken,redisService.getRoles(login)));
-            }
-        }
-
-        return Mono.empty();
+    private Mono<Map<String, Set<Role>>> generateAccessToken(String login) {
+        return generateToken(login, jwtAccessExpiration)
+                .flatMap(freshToken -> redisService.registerAccessToken(login, freshToken)
+                        .filter(Boolean::booleanValue)
+                        .flatMap(success -> success
+                                ? redisService.getRoles(login).map(roles -> Map.of(freshToken, roles))
+                                : Mono.empty()
+                        )
+                );
     }
 
     private Mono<Map<TokenType, String>> generateTokenPair(String login) {
